@@ -42,5 +42,6 @@
         },
         "editor.defaultFormatter": "ms-python.black-formatter",
         "editor.formatOnSave": true
-    }
+    },
+    "ansible.python.interpreterPath": "/home/g.margerie/.pyenv/versions/testansible-lint-issue/bin/python"
 }

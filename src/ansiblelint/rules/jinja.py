@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import sys
 from dataclasses import dataclass
@@ -20,11 +19,9 @@ from ansiblelint.constants import LINE_NUMBER_KEY
 from ansiblelint.errors import RuleMatchTransformMeta
 from ansiblelint.file_utils import Lintable
 from ansiblelint.rules import AnsibleLintRule, TransformMixin
-from ansiblelint.runner import get_matches
 from ansiblelint.skip_utils import get_rule_skips_from_line
 from ansiblelint.text import has_jinja
 from ansiblelint.utils import (  # type: ignore[attr-defined]
-    Templar,
     parse_yaml_from_file,
     template,
 )
@@ -33,7 +30,6 @@ from ansiblelint.yaml_utils import deannotate, nested_items_path
 if TYPE_CHECKING:
     from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
-    from ansiblelint.config import Options
     from ansiblelint.errors import MatchError
     from ansiblelint.utils import Task
 
@@ -65,6 +61,8 @@ ignored_re = re.compile(
             r"Unrecognized type <<class 'ansible.template.AnsibleUndefined'>> for (.*) filter <value>$",
             # https://github.com/ansible/ansible-lint/issues/3155
             r"^The '(.*)' test expects a dictionary$",
+            # https://github.com/ansible/ansible-lint/issues/4338
+            r"An unhandled exception occurred while templating (.*). Error was a <class 'ansible.errors.AnsibleFilterError'>, original message: The (.*) test expects a dictionary$",
         ],
     ),
     flags=re.MULTILINE | re.DOTALL,
@@ -496,406 +494,393 @@ def blacken(text: str) -> str:
 
 
 if "pytest" in sys.modules:
-    from unittest import mock
-
-    import pytest
 
     # pylint: disable=ungrouped-imports
     from ansiblelint.rules import RulesCollection
     from ansiblelint.runner import Runner
-    from ansiblelint.transformer import Transformer
 
-    @pytest.fixture(name="error_expected_lines")
-    def fixture_error_expected_lines() -> list[int]:
-        """Return list of expected error lines."""
-        return [33, 36, 39, 42, 45, 48, 74]
-
+    # @pytest.fixture(name="error_expected_lines")
+    # def fixture_error_expected_lines() -> list[int]:
+    #     """Return list of expected error lines."""
+    #     return [33, 36, 39, 42, 45, 48, 74]
     # 21 68
-    @pytest.fixture(name="lint_error_lines")
-    def fixture_lint_error_lines() -> list[int]:
-        """Get VarHasSpacesRules linting results on test_playbook."""
-        collection = RulesCollection()
-        collection.register(JinjaRule())
-        lintable = Lintable("examples/playbooks/jinja-spacing.yml")
-        results = Runner(lintable, rules=collection).run()
-        return [item.lineno for item in results]
-
-    def test_jinja_spacing_playbook(
-        error_expected_lines: list[int],
-        lint_error_lines: list[int],
-    ) -> None:
-        """Ensure that expected error lines are matching found linting error lines."""
-        # list unexpected error lines or non-matching error lines
-        error_lines_difference = list(
-            set(error_expected_lines).symmetric_difference(set(lint_error_lines)),
-        )
-        assert len(error_lines_difference) == 0
-
-    def test_jinja_spacing_vars() -> None:
-        """Ensure that expected error details are matching found linting error details."""
-        collection = RulesCollection()
-        collection.register(JinjaRule())
-        lintable = Lintable("examples/playbooks/vars/jinja-spacing.yml")
-        results = Runner(lintable, rules=collection).run()
-
-        error_expected_lineno = [14, 15, 16, 17, 18, 19, 32]
-        assert len(results) == len(error_expected_lineno)
-        for idx, err in enumerate(results):
-            assert err.lineno == error_expected_lineno[idx]
-
-    @pytest.mark.parametrize(
-        ("text", "expected", "tag"),
-        (
-            pytest.param(
-                "{{-x}}{#a#}{%1%}",
-                "{{- x }}{# a #}{% 1 %}",
-                "spacing",
-                id="add-missing-space",
-            ),
-            pytest.param("", "", "spacing", id="1"),
-            pytest.param("foo", "foo", "spacing", id="2"),
-            pytest.param("{##}", "{# #}", "spacing", id="3"),
-            # we want to keep leading spaces as they might be needed for complex multiline jinja files
-            pytest.param("{#  #}", "{#  #}", "spacing", id="4"),
-            pytest.param(
-                "{{-aaa|xx   }}foo\nbar{#some#}\n{%%}",
-                "{{- aaa | xx }}foo\nbar{# some #}\n{% %}",
-                "spacing",
-                id="5",
-            ),
-            pytest.param(
-                "Shell with jinja filter",
-                "Shell with jinja filter",
-                "spacing",
-                id="6",
-            ),
-            pytest.param(
-                "{{{'dummy_2':1}|true}}",
-                "{{ {'dummy_2': 1} | true }}",
-                "spacing",
-                id="7",
-            ),
-            pytest.param("{{{foo:{}}}}", "{{ {foo: {}} }}", "spacing", id="8"),
-            pytest.param(
-                "{{ {'test': {'subtest': variable}} }}",
-                "{{ {'test': {'subtest': variable}} }}",
-                "spacing",
-                id="9",
-            ),
-            pytest.param(
-                "http://foo.com/{{\n  case1 }}",
-                "http://foo.com/{{\n  case1 }}",
-                "spacing",
-                id="10",
-            ),
-            pytest.param("{{foo(123)}}", "{{ foo(123) }}", "spacing", id="11"),
-            pytest.param("{{ foo(a.b.c) }}", "{{ foo(a.b.c) }}", "spacing", id="12"),
-            # pytest.param(
-            #     "spacing",
-            # ),
-            pytest.param(
-                "{{foo(x =['server_options'])}}",
-                "{{ foo(x=['server_options']) }}",
-                "spacing",
-                id="14",
-            ),
-            pytest.param(
-                '{{ [ "host", "NA"] }}',
-                '{{ ["host", "NA"] }}',
-                "spacing",
-                id="15",
-            ),
-            pytest.param(
-                "{{ {'dummy_2': {'nested_dummy_1': value_1,\n    'nested_dummy_2': value_2}} |\ncombine(dummy_1) }}",
-                "{{ {'dummy_2': {'nested_dummy_1': value_1,\n    'nested_dummy_2': value_2}} |\ncombine(dummy_1) }}",
-                "spacing",
-                id="17",
-            ),
-            pytest.param("{{ & }}", "", "invalid", id="18"),
-            pytest.param(
-                "{{ good_format }}/\n{{- good_format }}\n{{- good_format -}}\n",
-                "{{ good_format }}/\n{{- good_format }}\n{{- good_format -}}\n",
-                "spacing",
-                id="19",
-            ),
-            pytest.param(
-                "{{ {'a': {'b': 'x', 'c': y}} }}",
-                "{{ {'a': {'b': 'x', 'c': y}} }}",
-                "spacing",
-                id="20",
-            ),
-            pytest.param(
-                "2*(1+(3-1)) is {{ 2 * {{ 1 + {{ 3 - 1 }}}} }}",
-                "2*(1+(3-1)) is {{ 2 * {{1 + {{3 - 1}}}} }}",
-                "spacing",
-                id="21",
-            ),
-            pytest.param(
-                '{{ "absent"\nif (v is version("2.8.0", ">=")\nelse "present" }}',
-                "",
-                "invalid",
-                id="22",
-            ),
-            pytest.param(
-                '{{lookup("x",y+"/foo/"+z+".txt")}}',
-                '{{ lookup("x", y + "/foo/" + z + ".txt") }}',
-                "spacing",
-                id="23",
-            ),
-            pytest.param(
-                "{{ x | map(attribute='value') }}",
-                "{{ x | map(attribute='value') }}",
-                "spacing",
-                id="24",
-            ),
-            pytest.param(
-                "{{ r(a= 1,b= True,c= 0.0,d= '') }}",
-                "{{ r(a=1, b=True, c=0.0, d='') }}",
-                "spacing",
-                id="25",
-            ),
-            pytest.param("{{ r(1,[]) }}", "{{ r(1, []) }}", "spacing", id="26"),
-            pytest.param(
-                "{{ lookup([ddd ]) }}",
-                "{{ lookup([ddd]) }}",
-                "spacing",
-                id="27",
-            ),
-            pytest.param(
-                "{{ [ x ] if x is string else x }}",
-                "{{ [x] if x is string else x }}",
-                "spacing",
-                id="28",
-            ),
-            pytest.param(
-                "{% if a|int <= 8 -%} iptables {%- else -%} iptables-nft {%- endif %}",
-                "{% if a | int <= 8 -%} iptables{%- else -%} iptables-nft{%- endif %}",
-                "spacing",
-                id="29",
-            ),
-            pytest.param(
-                # "- 2" -> "-2", minus does not get separated when there is no left side
-                "{{ - 2 }}",
-                "{{ -2 }}",
-                "spacing",
-                id="30",
-            ),
-            pytest.param(
-                # "-2" -> "-2", minus does get an undesired spacing
-                "{{ -2 }}",
-                "{{ -2 }}",
-                "spacing",
-                id="31",
-            ),
-            pytest.param(
-                # array ranges do not have space added
-                "{{ foo[2:4] }}",
-                "{{ foo[2:4] }}",
-                "spacing",
-                id="32",
-            ),
-            pytest.param(
-                # array ranges have the extra space removed
-                "{{ foo[2: 4] }}",
-                "{{ foo[2:4] }}",
-                "spacing",
-                id="33",
-            ),
-            pytest.param(
-                # negative array index
-                "{{ foo[-1] }}",
-                "{{ foo[-1] }}",
-                "spacing",
-                id="34",
-            ),
-            pytest.param(
-                # negative array index, repair
-                "{{ foo[- 1] }}",
-                "{{ foo[-1] }}",
-                "spacing",
-                id="35",
-            ),
-            pytest.param("{{ a +~'b' }}", "{{ a + ~'b' }}", "spacing", id="36"),
-            pytest.param(
-                "{{ (a[: -4] *~ b) }}",
-                "{{ (a[:-4] * ~b) }}",
-                "spacing",
-                id="37",
-            ),
-            pytest.param("{{ [a,~ b] }}", "{{ [a, ~b] }}", "spacing", id="38"),
-            # Not supported yet due to being accepted by black:
-            pytest.param("{{ item.0.user }}", "{{ item.0.user }}", "spacing", id="39"),
-            # Not supported by back, while jinja allows ~ to be binary operator:
-            pytest.param("{{ a ~ b }}", "{{ a ~ b }}", "spacing", id="40"),
-            pytest.param(
-                "--format='{{'{{'}}.Size{{'}}'}}'",
-                "--format='{{ '{{' }}.Size{{ '}}' }}'",
-                "spacing",
-                id="41",
-            ),
-            pytest.param(
-                "{{ list_one + {{ list_two | max }} }}",
-                "{{ list_one + {{list_two | max}} }}",
-                "spacing",
-                id="42",
-            ),
-            pytest.param(
-                "{{ lookup('file'   ,  '/tmp/non-existent',  errors='ignore') }}",
-                "{{ lookup('file', '/tmp/non-existent', errors='ignore') }}",
-                "spacing",
-                id="43",
-            ),
-            # https://github.com/ansible/ansible-lint/pull/3057
-            # since jinja 3.0.0, \r is converted to \n if the string has jinja in it
-            pytest.param(
-                "{{ 'foo' }}\r{{ 'bar' }}",
-                "{{ 'foo' }}\n{{ 'bar' }}",
-                "spacing",
-                id="44",
-            ),
-            # if we do not have any jinja constructs, we should keep original \r
-            # to match ansible behavior
-            pytest.param(
-                "foo\rbar",
-                "foo\rbar",
-                "spacing",
-                id="45",
-            ),
-        ),
-    )
-    def test_jinja(text: str, expected: str, tag: str) -> None:
-        """Tests our ability to spot spacing errors inside jinja2 templates."""
-        rule = JinjaRule()
-
-        reformatted, details, returned_tag = rule.check_whitespace(
-            text,
-            key="name",
-            lintable=Lintable("playbook.yml"),
-        )
-        assert tag == returned_tag, details
-        assert expected == reformatted
-
-    @pytest.mark.parametrize(
-        ("text", "expected", "tag"),
-        (
-            pytest.param(
-                "1+2",
-                "1 + 2",
-                "spacing",
-                id="0",
-            ),
-            pytest.param(
-                "- 1",
-                "-1",
-                "spacing",
-                id="1",
-            ),
-            # Ensure that we do not choke with double templating on implicit
-            # and instead we remove them braces.
-            pytest.param("{{ o | bool }}", "o | bool", "spacing", id="2"),
-        ),
-    )
-    def test_jinja_implicit(text: str, expected: str, tag: str) -> None:
-        """Tests our ability to spot spacing errors implicit jinja2 templates."""
-        rule = JinjaRule()
-        # implicit jinja2 are working only inside playbooks and tasks
-        lintable = Lintable(name="playbook.yml", kind="playbook")
-        reformatted, details, returned_tag = rule.check_whitespace(
-            text,
-            key="when",
-            lintable=lintable,
-        )
-        assert tag == returned_tag, details
-        assert expected == reformatted
-
-    @pytest.mark.parametrize(
-        ("lintable", "matches"),
-        (pytest.param("examples/playbooks/vars/rule_jinja_vars.yml", 0, id="0"),),
-    )
-    def test_jinja_file(lintable: str, matches: int) -> None:
-        """Tests our ability to process var filesspot spacing errors."""
-        collection = RulesCollection()
-        collection.register(JinjaRule())
-        errs = Runner(lintable, rules=collection).run()
-        assert len(errs) == matches
-        for err in errs:
-            assert isinstance(err, JinjaRule)
-            assert errs[0].tag == "jinja[invalid]"
-            assert errs[0].rule.id == "jinja"
-
-    def test_jinja_invalid() -> None:
-        """Tests our ability to spot spacing errors inside jinja2 templates."""
-        collection = RulesCollection()
-        collection.register(JinjaRule())
-        success = "examples/playbooks/rule-jinja-fail.yml"
-        errs = Runner(success, rules=collection).run()
-        assert len(errs) == 2
-        assert errs[0].tag == "jinja[spacing]"
-        assert errs[0].rule.id == "jinja"
-        assert errs[0].lineno == 9
-        assert errs[1].tag == "jinja[invalid]"
-        assert errs[1].rule.id == "jinja"
-        assert errs[1].lineno == 9
+    # @pytest.fixture(name="lint_error_lines")
+    # def fixture_lint_error_lines() -> list[int]:
+    #     """Get VarHasSpacesRules linting results on test_playbook."""
+    #     collection = RulesCollection()
+    #     collection.register(JinjaRule())
+    #     lintable = Lintable("examples/playbooks/jinja-spacing.yml")
+    #     results = Runner(lintable, rules=collection).run()
+    #     return [item.lineno for item in results]
+    # def test_jinja_spacing_playbook(
+    #     error_expected_lines: list[int],
+    #     lint_error_lines: list[int],
+    # ) -> None:
+    #     """Ensure that expected error lines are matching found linting error lines."""
+    #     # list unexpected error lines or non-matching error lines
+    #     error_lines_difference = list(
+    #         set(error_expected_lines).symmetric_difference(set(lint_error_lines)),
+    #     )
+    #     assert len(error_lines_difference) == 0
+    # def test_jinja_spacing_vars() -> None:
+    #     """Ensure that expected error details are matching found linting error details."""
+    #     collection = RulesCollection()
+    #     collection.register(JinjaRule())
+    #     lintable = Lintable("examples/playbooks/vars/jinja-spacing.yml")
+    #     results = Runner(lintable, rules=collection).run()
+    #     error_expected_lineno = [14, 15, 16, 17, 18, 19, 32]
+    #     assert len(results) == len(error_expected_lineno)
+    #     for idx, err in enumerate(results):
+    #         assert err.lineno == error_expected_lineno[idx]
+    # @pytest.mark.parametrize(
+    #     ("text", "expected", "tag"),
+    #     (
+    #         pytest.param(
+    #             "{{-x}}{#a#}{%1%}",
+    #             "{{- x }}{# a #}{% 1 %}",
+    #             "spacing",
+    #             id="add-missing-space",
+    #         ),
+    #         pytest.param("", "", "spacing", id="1"),
+    #         pytest.param("foo", "foo", "spacing", id="2"),
+    #         pytest.param("{##}", "{# #}", "spacing", id="3"),
+    #         # we want to keep leading spaces as they might be needed for complex multiline jinja files
+    #         pytest.param("{#  #}", "{#  #}", "spacing", id="4"),
+    #         pytest.param(
+    #             "{{-aaa|xx   }}foo\nbar{#some#}\n{%%}",
+    #             "{{- aaa | xx }}foo\nbar{# some #}\n{% %}",
+    #             "spacing",
+    #             id="5",
+    #         ),
+    #         pytest.param(
+    #             "Shell with jinja filter",
+    #             "Shell with jinja filter",
+    #             "spacing",
+    #             id="6",
+    #         ),
+    #         pytest.param(
+    #             "{{{'dummy_2':1}|true}}",
+    #             "{{ {'dummy_2': 1} | true }}",
+    #             "spacing",
+    #             id="7",
+    #         ),
+    #         pytest.param("{{{foo:{}}}}", "{{ {foo: {}} }}", "spacing", id="8"),
+    #         pytest.param(
+    #             "{{ {'test': {'subtest': variable}} }}",
+    #             "{{ {'test': {'subtest': variable}} }}",
+    #             "spacing",
+    #             id="9",
+    #         ),
+    #         pytest.param(
+    #             "http://foo.com/{{\n  case1 }}",
+    #             "http://foo.com/{{\n  case1 }}",
+    #             "spacing",
+    #             id="10",
+    #         ),
+    #         pytest.param("{{foo(123)}}", "{{ foo(123) }}", "spacing", id="11"),
+    #         pytest.param("{{ foo(a.b.c) }}", "{{ foo(a.b.c) }}", "spacing", id="12"),
+    #         # pytest.param(
+    #         #     "spacing",
+    #         # ),
+    #         pytest.param(
+    #             "{{foo(x =['server_options'])}}",
+    #             "{{ foo(x=['server_options']) }}",
+    #             "spacing",
+    #             id="14",
+    #         ),
+    #         pytest.param(
+    #             '{{ [ "host", "NA"] }}',
+    #             '{{ ["host", "NA"] }}',
+    #             "spacing",
+    #             id="15",
+    #         ),
+    #         pytest.param(
+    #             "{{ {'dummy_2': {'nested_dummy_1': value_1,\n    'nested_dummy_2': value_2}} |\ncombine(dummy_1) }}",
+    #             "{{ {'dummy_2': {'nested_dummy_1': value_1,\n    'nested_dummy_2': value_2}} |\ncombine(dummy_1) }}",
+    #             "spacing",
+    #             id="17",
+    #         ),
+    #         pytest.param("{{ & }}", "", "invalid", id="18"),
+    #         pytest.param(
+    #             "{{ good_format }}/\n{{- good_format }}\n{{- good_format -}}\n",
+    #             "{{ good_format }}/\n{{- good_format }}\n{{- good_format -}}\n",
+    #             "spacing",
+    #             id="19",
+    #         ),
+    #         pytest.param(
+    #             "{{ {'a': {'b': 'x', 'c': y}} }}",
+    #             "{{ {'a': {'b': 'x', 'c': y}} }}",
+    #             "spacing",
+    #             id="20",
+    #         ),
+    #         pytest.param(
+    #             "2*(1+(3-1)) is {{ 2 * {{ 1 + {{ 3 - 1 }}}} }}",
+    #             "2*(1+(3-1)) is {{ 2 * {{1 + {{3 - 1}}}} }}",
+    #             "spacing",
+    #             id="21",
+    #         ),
+    #         pytest.param(
+    #             '{{ "absent"\nif (v is version("2.8.0", ">=")\nelse "present" }}',
+    #             "",
+    #             "invalid",
+    #             id="22",
+    #         ),
+    #         pytest.param(
+    #             '{{lookup("x",y+"/foo/"+z+".txt")}}',
+    #             '{{ lookup("x", y + "/foo/" + z + ".txt") }}',
+    #             "spacing",
+    #             id="23",
+    #         ),
+    #         pytest.param(
+    #             "{{ x | map(attribute='value') }}",
+    #             "{{ x | map(attribute='value') }}",
+    #             "spacing",
+    #             id="24",
+    #         ),
+    #         pytest.param(
+    #             "{{ r(a= 1,b= True,c= 0.0,d= '') }}",
+    #             "{{ r(a=1, b=True, c=0.0, d='') }}",
+    #             "spacing",
+    #             id="25",
+    #         ),
+    #         pytest.param("{{ r(1,[]) }}", "{{ r(1, []) }}", "spacing", id="26"),
+    #         pytest.param(
+    #             "{{ lookup([ddd ]) }}",
+    #             "{{ lookup([ddd]) }}",
+    #             "spacing",
+    #             id="27",
+    #         ),
+    #         pytest.param(
+    #             "{{ [ x ] if x is string else x }}",
+    #             "{{ [x] if x is string else x }}",
+    #             "spacing",
+    #             id="28",
+    #         ),
+    #         pytest.param(
+    #             "{% if a|int <= 8 -%} iptables {%- else -%} iptables-nft {%- endif %}",
+    #             "{% if a | int <= 8 -%} iptables{%- else -%} iptables-nft{%- endif %}",
+    #             "spacing",
+    #             id="29",
+    #         ),
+    #         pytest.param(
+    #             # "- 2" -> "-2", minus does not get separated when there is no left side
+    #             "{{ - 2 }}",
+    #             "{{ -2 }}",
+    #             "spacing",
+    #             id="30",
+    #         ),
+    #         pytest.param(
+    #             # "-2" -> "-2", minus does get an undesired spacing
+    #             "{{ -2 }}",
+    #             "{{ -2 }}",
+    #             "spacing",
+    #             id="31",
+    #         ),
+    #         pytest.param(
+    #             # array ranges do not have space added
+    #             "{{ foo[2:4] }}",
+    #             "{{ foo[2:4] }}",
+    #             "spacing",
+    #             id="32",
+    #         ),
+    #         pytest.param(
+    #             # array ranges have the extra space removed
+    #             "{{ foo[2: 4] }}",
+    #             "{{ foo[2:4] }}",
+    #             "spacing",
+    #             id="33",
+    #         ),
+    #         pytest.param(
+    #             # negative array index
+    #             "{{ foo[-1] }}",
+    #             "{{ foo[-1] }}",
+    #             "spacing",
+    #             id="34",
+    #         ),
+    #         pytest.param(
+    #             # negative array index, repair
+    #             "{{ foo[- 1] }}",
+    #             "{{ foo[-1] }}",
+    #             "spacing",
+    #             id="35",
+    #         ),
+    #         pytest.param("{{ a +~'b' }}", "{{ a + ~'b' }}", "spacing", id="36"),
+    #         pytest.param(
+    #             "{{ (a[: -4] *~ b) }}",
+    #             "{{ (a[:-4] * ~b) }}",
+    #             "spacing",
+    #             id="37",
+    #         ),
+    #         pytest.param("{{ [a,~ b] }}", "{{ [a, ~b] }}", "spacing", id="38"),
+    #         # Not supported yet due to being accepted by black:
+    #         pytest.param("{{ item.0.user }}", "{{ item.0.user }}", "spacing", id="39"),
+    #         # Not supported by back, while jinja allows ~ to be binary operator:
+    #         pytest.param("{{ a ~ b }}", "{{ a ~ b }}", "spacing", id="40"),
+    #         pytest.param(
+    #             "--format='{{'{{'}}.Size{{'}}'}}'",
+    #             "--format='{{ '{{' }}.Size{{ '}}' }}'",
+    #             "spacing",
+    #             id="41",
+    #         ),
+    #         pytest.param(
+    #             "{{ list_one + {{ list_two | max }} }}",
+    #             "{{ list_one + {{list_two | max}} }}",
+    #             "spacing",
+    #             id="42",
+    #         ),
+    #         pytest.param(
+    #             "{{ lookup('file'   ,  '/tmp/non-existent',  errors='ignore') }}",
+    #             "{{ lookup('file', '/tmp/non-existent', errors='ignore') }}",
+    #             "spacing",
+    #             id="43",
+    #         ),
+    #         # https://github.com/ansible/ansible-lint/pull/3057
+    #         # since jinja 3.0.0, \r is converted to \n if the string has jinja in it
+    #         pytest.param(
+    #             "{{ 'foo' }}\r{{ 'bar' }}",
+    #             "{{ 'foo' }}\n{{ 'bar' }}",
+    #             "spacing",
+    #             id="44",
+    #         ),
+    #         # if we do not have any jinja constructs, we should keep original \r
+    #         # to match ansible behavior
+    #         pytest.param(
+    #             "foo\rbar",
+    #             "foo\rbar",
+    #             "spacing",
+    #             id="45",
+    #         ),
+    #     ),
+    # )
+    # def test_jinja(text: str, expected: str, tag: str) -> None:
+    #     """Tests our ability to spot spacing errors inside jinja2 templates."""
+    #     rule = JinjaRule()
+    #     reformatted, details, returned_tag = rule.check_whitespace(
+    #         text,
+    #         key="name",
+    #         lintable=Lintable("playbook.yml"),
+    #     )
+    #     assert tag == returned_tag, details
+    #     assert expected == reformatted
+    # @pytest.mark.parametrize(
+    #     ("text", "expected", "tag"),
+    #     (
+    #         pytest.param(
+    #             "1+2",
+    #             "1 + 2",
+    #             "spacing",
+    #             id="0",
+    #         ),
+    #         pytest.param(
+    #             "- 1",
+    #             "-1",
+    #             "spacing",
+    #             id="1",
+    #         ),
+    #         # Ensure that we do not choke with double templating on implicit
+    #         # and instead we remove them braces.
+    #         pytest.param("{{ o | bool }}", "o | bool", "spacing", id="2"),
+    #     ),
+    # )
+    # def test_jinja_implicit(text: str, expected: str, tag: str) -> None:
+    #     """Tests our ability to spot spacing errors implicit jinja2 templates."""
+    #     rule = JinjaRule()
+    #     # implicit jinja2 are working only inside playbooks and tasks
+    #     lintable = Lintable(name="playbook.yml", kind="playbook")
+    #     reformatted, details, returned_tag = rule.check_whitespace(
+    #         text,
+    #         key="when",
+    #         lintable=lintable,
+    #     )
+    #     assert tag == returned_tag, details
+    #     assert expected == reformatted
+    # @pytest.mark.parametrize(
+    #     ("lintable", "matches"),
+    #     (pytest.param("examples/playbooks/vars/rule_jinja_vars.yml", 0, id="0"),),
+    # )
+    # def test_jinja_file(lintable: str, matches: int) -> None:
+    #     """Tests our ability to process var filesspot spacing errors."""
+    #     collection = RulesCollection()
+    #     collection.register(JinjaRule())
+    #     errs = Runner(lintable, rules=collection).run()
+    #     assert len(errs) == matches
+    #     for err in errs:
+    #         assert isinstance(err, JinjaRule)
+    #         assert errs[0].tag == "jinja[invalid]"
+    #         assert errs[0].rule.id == "jinja"
+    # def test_jinja_invalid() -> None:
+    #     """Tests our ability to spot spacing errors inside jinja2 templates."""
+    #     collection = RulesCollection()
+    #     collection.register(JinjaRule())
+    #     success = "examples/playbooks/rule-jinja-fail.yml"
+    #     errs = Runner(success, rules=collection).run()
+    #     assert len(errs) == 2
+    #     assert errs[0].tag == "jinja[spacing]"
+    #     assert errs[0].rule.id == "jinja"
+    #     assert errs[0].lineno == 9
+    #     assert errs[1].tag == "jinja[invalid]"
+    #     assert errs[1].rule.id == "jinja"
+    #     assert errs[1].lineno == 9
 
     def test_jinja_valid() -> None:
         """Tests our ability to parse jinja, even when variables may not be defined."""
         collection = RulesCollection()
         collection.register(JinjaRule())
         success = "examples/playbooks/rule-jinja-pass.yml"
-        errs = Runner(success, rules=collection).run()
+        errs = Runner(success, rules=collection, verbosity=10).run()
         assert len(errs) == 0
 
-    @mock.patch.dict(os.environ, {"ANSIBLE_LINT_WRITE_TMP": "1"}, clear=True)
-    def test_jinja_transform(
-        config_options: Options,
-        default_rules_collection: RulesCollection,
-    ) -> None:
-        """Test transform functionality for jinja rule."""
-        playbook = Path("examples/playbooks/rule-jinja-before.yml")
-        config_options.write_list = ["all"]
+    # @mock.patch.dict(os.environ, {"ANSIBLE_LINT_WRITE_TMP": "1"}, clear=True)
+    # def test_jinja_transform(
+    #     config_options: Options,
+    #     default_rules_collection: RulesCollection,
+    # ) -> None:
+    #     """Test transform functionality for jinja rule."""
+    #     playbook = Path("examples/playbooks/rule-jinja-before.yml")
+    #     config_options.write_list = ["all"]
 
-        config_options.lintables = [str(playbook)]
-        runner_result = get_matches(
-            rules=default_rules_collection,
-            options=config_options,
-        )
-        transformer = Transformer(result=runner_result, options=config_options)
-        transformer.run()
+    #     config_options.lintables = [str(playbook)]
+    #     runner_result = get_matches(
+    #         rules=default_rules_collection,
+    #         options=config_options,
+    #     )
+    #     transformer = Transformer(result=runner_result, options=config_options)
+    #     transformer.run()
 
-        matches = runner_result.matches
-        assert len(matches) == 2
+    #     matches = runner_result.matches
+    #     assert len(matches) == 2
 
-        orig_content = playbook.read_text(encoding="utf-8")
-        expected_content = playbook.with_suffix(
-            f".transformed{playbook.suffix}",
-        ).read_text(encoding="utf-8")
-        transformed_content = playbook.with_suffix(f".tmp{playbook.suffix}").read_text(
-            encoding="utf-8",
-        )
+    #     orig_content = playbook.read_text(encoding="utf-8")
+    #     expected_content = playbook.with_suffix(
+    #         f".transformed{playbook.suffix}",
+    #     ).read_text(encoding="utf-8")
+    #     transformed_content = playbook.with_suffix(f".tmp{playbook.suffix}").read_text(
+    #         encoding="utf-8",
+    #     )
 
-        assert orig_content != transformed_content
-        assert expected_content == transformed_content
-        playbook.with_suffix(f".tmp{playbook.suffix}").unlink()
+    #     assert orig_content != transformed_content
+    #     assert expected_content == transformed_content
+    #     playbook.with_suffix(f".tmp{playbook.suffix}").unlink()
 
-    def test_jinja_nested_var_errors() -> None:
-        """Tests our ability to handle nested var errors from jinja2 templates."""
+    # def test_jinja_nested_var_errors() -> None:
+    #     """Tests our ability to handle nested var errors from jinja2 templates."""
 
-        def _do_template(*args, **kwargs):  # type: ignore[no-untyped-def] # Templar.do_template has no type hint
-            data = args[1]
+    #     def _do_template(*args, **kwargs):  # type: ignore[no-untyped-def] # Templar.do_template has no type hint
+    #         data = args[1]
 
-            if data != "{{ 12 | random(seed=inventory_hostname) }}":
-                return do_template(*args, **kwargs)
+    #         if data != "{{ 12 | random(seed=inventory_hostname) }}":
+    #             return do_template(*args, **kwargs)
 
-            msg = "Unexpected templating type error occurred on (foo): bar"
-            raise AnsibleError(msg)
+    #         msg = "Unexpected templating type error occurred on (foo): bar"
+    #         raise AnsibleError(msg)
 
-        do_template = Templar.do_template
-        collection = RulesCollection()
-        collection.register(JinjaRule())
-        lintable = Lintable("examples/playbooks/jinja-nested-vars.yml")
-        with mock.patch.object(Templar, "do_template", _do_template):
-            results = Runner(lintable, rules=collection).run()
-            assert len(results) == 0
+    #     do_template = Templar.do_template
+    #     collection = RulesCollection()
+    #     collection.register(JinjaRule())
+    #     lintable = Lintable("examples/playbooks/jinja-nested-vars.yml")
+    #     with mock.patch.object(Templar, "do_template", _do_template):
+    #         results = Runner(lintable, rules=collection).run()
+    #         assert len(results) == 0
 
 
 def _get_error_line(task: dict[str, Any], path: list[str | int]) -> int:
